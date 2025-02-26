@@ -94,9 +94,10 @@ public Step step1() {
 }
 
 @Bean
-public Job runJob() {
+public Job runJob(JobCompletionListener listener) {
     return new JobBuilder("sampleJob", jobRepository)
             .incrementer(new RunIdIncrementer())
+            .listener(listener)
             .start(step1())
             .build();
 }
