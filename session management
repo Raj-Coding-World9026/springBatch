@@ -1,0 +1,127 @@
+@EnableWebSecurity
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Autowired
+    private SessionRegistry sessionRegistry;
+ 
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .authorizeRequests()
+            .anyRequest().authenticated()
+            .and()
+            .sessionManagement()
+            .maximumSessions(2) // Limit to 2 sessions per user
+            .sessionRegistry(sessionRegistry()) // Use custom SessionRegistry
+            .maxSessionsPreventsLogin(false) // Kick out the oldest session
+            .expiredUrl("/login?expired=true");
+    }
+
+    @Bean
+    public SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+
+    @Bean
+    public ConcurrentSessionControlAuthenticationStrategy sessionControlStrategy() {
+        ConcurrentSessionControlAuthenticationStrategy strategy =
+                new ConcurrentSessionControlAuthenticationStrategy(sessionRegistry());
+        strategy.setMaximumSessions(2); // Allow up to 2 sessions
+        return strategy;
+    }
+}
+
+----
+
+@Component
+public class CustomAuthenticationProvider extends DaoAuthenticationProvider {
+
+    @Autowired
+    private ConcurrentSessionControlAuthenticationStrategy sessionControlStrategy;
+
+    @Override
+    public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+        Authentication auth = super.authenticate(authentication);
+
+        // Apply session control strategy
+        sessionControlStrategy.onAuthentication(auth, null);
+
+        return auth;
+    }
+}
+
+
+-----
+@Service
+public class CustomAuthenticationService {
+
+    @Autowired
+    private SessionRegistry sessionRegistry;
+
+    public List<String> getActiveSessions(String username) {
+        return sessionRegistry.getAllSessions(username, false).stream()
+                .map(session -> session.getSessionId())
+                .collect(Collectors.toList());
+    }
+
+    public void expireOldestSession(String username) {
+        List<SessionInformation> sessions = sessionRegistry.getAllSessions(username, false);
+        if (!sessions.isEmpty()) {
+            sessions.get(0).expireNow(); // Expire the oldest session
+        }
+    }
+}
+---------
+@Configuration
+public class SessionConfig {
+
+    @Bean
+    public HttpSessionEventPublisher httpSessionEventPublisher() {
+        return new HttpSessionEventPublisher();
+    }
+
+    @Bean
+    public SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+}
+--------------
+@RestController
+@RequestMapping("/auth")
+public class AuthController {
+
+    @Autowired
+    private CustomAuthenticationService customAuthenticationService;
+
+    @Autowired
+    private SessionRegistry sessionRegistry;
+
+    @PostMapping("/login")
+    public ResponseEntity<String> login(@RequestParam String username, HttpSession session) {
+        String sessionId = session.getId(); // Retrieve the current session ID
+
+        List<String> activeSessions = customAuthenticationService.getActiveSessions(username);
+        if (activeSessions.size() >= 2) {
+            customAuthenticationService.expireOldestSession(username);
+        }
+
+        sessionRegistry.registerNewSession(sessionId, username); // Register the new session
+        return ResponseEntity.status(HttpStatus.OK)
+                .body("Logged in successfully. Active session ID: " + sessionId);
+    }
+
+    @PostMapping("/logout")
+    public ResponseEntity<String> logout(HttpSession session) {
+        String sessionId = session.getId();
+        sessionRegistry.removeSessionInformation(sessionId); // Remove session from registry
+        session.invalidate(); // Invalidate the session
+        return ResponseEntity.status(HttpStatus.OK).body("Logged out successfully.");
+    }
+
+    @GetMapping("/active-sessions")
+    public ResponseEntity<List<String>> getActiveSessions(@RequestParam String username) {
+        List<String> activeSessions = customAuthenticationService.getActiveSessions(username);
+        return ResponseEntity.ok(activeSessions);
+    }
+}
